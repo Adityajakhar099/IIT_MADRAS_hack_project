@@ -1,0 +1,137 @@
+[
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "Bike",
+    "violation": "No Helmet",
+    "law_section": "129/194(D)",
+    "fine": 1000,
+    "repeat_fine": 2000,
+    "license_suspension": "3 months"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "Car",
+    "violation": "No Seatbelt",
+    "law_section": "194B(1)",
+    "fine": 1000,
+    "repeat_fine": 1500,
+    "license_suspension": "None"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "Signal Jumping",
+    "law_section": "119/177",
+    "fine": 1000,
+    "repeat_fine": 2000,
+    "license_suspension": "3 months"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "Overspeeding",
+    "law_section": "112/183",
+    "fine": 2000,
+    "repeat_fine": 4000,
+    "license_suspension": "3 months"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "Drunk Driving",
+    "law_section": "185",
+    "fine": 10000,
+    "repeat_fine": 15000,
+    "license_suspension": "6 months"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "No Insurance",
+    "law_section": "196",
+    "fine": 2000,
+    "repeat_fine": 4000,
+    "license_suspension": "None"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "No License",
+    "law_section": "181",
+    "fine": 5000,
+    "repeat_fine": 5000,
+    "license_suspension": "None"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "Dangerous Driving",
+    "law_section": "184",
+    "fine": 5000,
+    "repeat_fine": 10000,
+    "license_suspension": "3 months"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "Mobile Phone Usage",
+    "law_section": "184(c)",
+    "fine": 5000,
+    "repeat_fine": 10000,
+    "license_suspension": "3 months"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "Wrong Parking",
+    "law_section": "122/177",
+    "fine": 500,
+    "repeat_fine": 1500,
+    "license_suspension": "None"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "Bike",
+    "violation": "Triple Riding",
+    "law_section": "128/194C",
+    "fine": 1000,
+    "repeat_fine": 1000,
+    "license_suspension": "3 months"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "PUCC violation",
+    "law_section": "190(2)",
+    "fine": 10000,
+    "repeat_fine": 10000,
+    "license_suspension": "3 months"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "Driving without registration",
+    "law_section": "192",
+    "fine": 5000,
+    "repeat_fine": 10000,
+    "license_suspension": "None"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "Illegal modification",
+    "law_section": "182A(4)",
+    "fine": 5000,
+    "repeat_fine": 5000,
+    "license_suspension": "None"
+  },
+  {
+    "state": "Maharashtra",
+    "vehicle_type": "All",
+    "violation": "Rash driving",
+    "law_section": "184",
+    "fine": 2000,
+    "repeat_fine": 5000,
+    "license_suspension": "3 months"
+  }
+]
