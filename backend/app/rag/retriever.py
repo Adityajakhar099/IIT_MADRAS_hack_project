@@ -10,13 +10,13 @@ import os
 from typing import Any, Dict, List, Optional
 
 import chromadb
-from sentence_transformers import SentenceTransformer
+import google.generativeai as genai
+from dotenv import load_dotenv
 
 # Configure logger
 logger = logging.getLogger(__name__)
 
 # Global cache variables for singleton-like reuse
-_embedding_model: Optional[SentenceTransformer] = None
 _chroma_client: Optional[chromadb.PersistentClient] = None
 _collection: Optional[chromadb.Collection] = None
 
@@ -30,36 +30,26 @@ else:
     )
 
 DEFAULT_COLLECTION_NAME = "traffic_rules"
-DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"
 
 
-def load_embedding_model(model_name: str = DEFAULT_MODEL_NAME) -> SentenceTransformer:
+def get_gemini_embedding(text: str, is_document: bool = False) -> List[float]:
     """
-    Loads and caches the SentenceTransformer model.
-
-    This function ensures that the embedding model is initialized only once
-    and is reused for subsequent calls, optimizing query performance.
-
-    Args:
-        model_name (str): The name of the sentence-transformers model to load.
-                          Defaults to 'all-MiniLM-L6-v2'.
-
-    Returns:
-        SentenceTransformer: The loaded embedding model instance.
-
-    Raises:
-        RuntimeError: If loading the model fails.
+    Generates embedding vector for text using Google Gemini's text-embedding-004 API.
     """
-    global _embedding_model
-    if _embedding_model is None:
-        logger.info(f"Loading embedding model '{model_name}'...")
-        try:
-            _embedding_model = SentenceTransformer(model_name)
-            logger.info(f"Embedding model '{model_name}' loaded successfully.")
-        except Exception as e:
-            logger.error(f"Failed to load embedding model '{model_name}': {e}")
-            raise RuntimeError(f"Failed to load embedding model '{model_name}': {e}") from e
-    return _embedding_model
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not found in environment.")
+        
+    genai.configure(api_key=api_key)
+    task_type = "retrieval_document" if is_document else "retrieval_query"
+    
+    result = genai.embed_content(
+        model="models/gemini-embedding-001",
+        content=text,
+        task_type=task_type
+    )
+    return result['embedding']
 
 
 def get_collection(
@@ -140,13 +130,11 @@ def embed_query(query: str) -> List[float]:
         logger.error(error_msg)
         raise ValueError(error_msg)
         
-    # Get model and encode
-    model = load_embedding_model()
     try:
         query_cleaned = query.strip()
         logger.info(f"Generating embedding for query: '{query_cleaned}'")
-        embedding = model.encode(query_cleaned)
-        return embedding.tolist()
+        embedding = get_gemini_embedding(query_cleaned, is_document=False)
+        return embedding
     except Exception as e:
         error_msg = f"Failed to encode query '{query}': {e}"
         logger.error(error_msg)

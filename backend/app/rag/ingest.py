@@ -2,7 +2,8 @@ import os
 import glob
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
+import google.generativeai as genai
+from dotenv import load_dotenv
 import chromadb
 
 from app.utils.parser import extract_text_from_pdf, clean_text
@@ -45,12 +46,25 @@ def process_pdf(pdf_path):
 
 
 def create_embeddings(chunks):
-    print("Loading embedding model...")
-
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-
-    embeddings = model.encode(chunks)
-
+    print(f"Generating Gemini embeddings for {len(chunks)} chunks...")
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not found in environment.")
+        
+    genai.configure(api_key=api_key)
+    
+    if not chunks:
+        import numpy as np
+        return np.array([])
+        
+    result = genai.embed_content(
+        model="models/gemini-embedding-001",
+        content=chunks,
+        task_type="retrieval_document"
+    )
+    import numpy as np
+    embeddings = np.array(result['embedding'])
     return embeddings
 
 
@@ -86,8 +100,6 @@ def ingest_all_pdfs():
 
     print(f"Found {len(pdf_files)} PDFs")
 
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-
     for pdf_path in pdf_files:
         source_file = os.path.basename(pdf_path)
 
@@ -96,7 +108,7 @@ def ingest_all_pdfs():
         if not chunks:
             continue
 
-        embeddings = model.encode(chunks)
+        embeddings = create_embeddings(chunks)
 
         store_in_chroma(chunks, embeddings, source_file)
 

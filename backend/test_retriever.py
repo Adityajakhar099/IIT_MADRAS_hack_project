@@ -22,7 +22,7 @@ from app.rag.retriever import (
     DEFAULT_DB_PATH,
     DEFAULT_COLLECTION_NAME,
     search_documents,
-    load_embedding_model
+    get_gemini_embedding
 )
 
 
@@ -50,8 +50,7 @@ def seed_mock_database():
     logger.info("ChromaDB collection is missing or empty. Seeding mock traffic rules...")
     collection = client.get_or_create_collection(name=DEFAULT_COLLECTION_NAME)
     
-    # Load embedding model to generate embeddings for seed data
-    model = load_embedding_model()
+    # We will generate embeddings using the Gemini embedding API
     
     # Representative document chunks for Indian traffic rules
     documents = [
@@ -82,7 +81,7 @@ def seed_mock_database():
     ]
     
     # Generate embeddings
-    embeddings = model.encode(documents).tolist()
+    embeddings = [get_gemini_embedding(doc, is_document=True) for doc in documents]
     
     # Add to ChromaDB
     collection.add(
