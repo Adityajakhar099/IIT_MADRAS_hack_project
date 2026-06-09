@@ -31,10 +31,5 @@ COPY backend/ ./
 # Copy compiled frontend from Stage 1
 COPY --from=frontend-builder /frontend/dist /frontend/dist
 
-# Pre-populate Vector DB during build
-RUN python -m app.rag.ingest
-
-EXPOSE 8000
-ENV PORT=8000
-
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run ingestion at startup (where GEMINI_API_KEY runtime variable is available) and start uvicorn
+CMD ["sh", "-c", "python -m app.rag.ingest && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

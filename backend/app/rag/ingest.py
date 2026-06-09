@@ -92,6 +92,16 @@ def store_in_chroma(chunks, embeddings, source_file):
 
 
 def ingest_all_pdfs():
+    # Check if collection is already populated
+    try:
+        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+        collection = client.get_collection(name=COLLECTION_NAME)
+        if collection.count() > 0:
+            print("ChromaDB collection already populated. Skipping ingestion.")
+            return
+    except Exception:
+        pass
+
     pdf_files = glob.glob("data/raw/*.pdf")
 
     if not pdf_files:
