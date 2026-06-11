@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { RULES_DATABASE } from './rules';
 import { 
   LayoutDashboard, 
   FileSearch, 
@@ -18,8 +19,10 @@ import {
   TrendingUp,
   MapPin,
   Calendar,
-  DollarSign
+  DollarSign,
+  Download
 } from 'lucide-react';
+import { saveFileToOfflineQueue, getOfflineQueue, removeFileFromOfflineQueue } from './indexedDb';
 import { gsap } from 'gsap';
 import confetti from 'canvas-confetti';
 import { Line, Bar, Doughnut } from 'react-chartjs-2';
@@ -68,9 +71,135 @@ const VIOLATIONS_DATABASE = [
   "Rash driving"
 ];
 
+// Levenshtein function for client-side fuzzy matching
+function levenshteinDistance(a, b) {
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          Math.min(
+            matrix[i][j - 1] + 1, // insertion
+            matrix[i - 1][j] + 1 // deletion
+          )
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+function getSimilarity(s1, s2) {
+  let longer = s1.toLowerCase();
+  let shorter = s2.toLowerCase();
+  if (s1.length < s2.length) {
+    longer = s2.toLowerCase();
+    shorter = s1.toLowerCase();
+  }
+  const longerLength = longer.length;
+  if (longerLength === 0) return 1.0;
+  return (longerLength - levenshteinDistance(longer, shorter)) / parseFloat(longerLength);
+}
+
+const VEHICLE_NORMALIZATION = {
+  "bike": "Bike", "two-wheeler": "Bike", "2-wheeler": "Bike", "motorcycle": "Bike", "scooter": "Bike",
+  "car": "Car", "four-wheeler": "Car", "4-wheeler": "Car", "lmv": "Car", "auto": "Car", "jeep": "Car", "suv": "Car",
+  "truck": "Heavy Vehicle", "bus": "Heavy Vehicle", "heavy vehicle": "Heavy Vehicle", "hmv": "Heavy Vehicle"
+};
+
+function normalizeVehicleType(vehicleType) {
+  if (!vehicleType) return null;
+  const key = vehicleType.trim().toLowerCase();
+  return VEHICLE_NORMALIZATION[key] || null;
+}
+
+function calculateFineClientSide(state, vehicleType, violation, repeatOffense) {
+  const stateKey = state.trim().toLowerCase();
+  const rules = RULES_DATABASE[stateKey];
+  if (!rules) {
+    throw new Error(`State '${state}' is not supported. Supported states are: Rajasthan, Maharashtra`);
+  }
+
+  const normalizedVehicle = normalizeVehicleType(vehicleType);
+  if (!normalizedVehicle) {
+    throw new Error(`Vehicle type '${vehicleType}' is invalid. Supported categories are Bike, Car, Heavy Vehicle.`);
+  }
+
+  // Find exact or fuzzy matched violation
+  const allViolations = Array.from(new Set(rules.map(r => r.violation)));
+  let matchedViolation = null;
+
+  // Exact match first
+  for (let v of allViolations) {
+    if (v.toLowerCase() === violation.trim().toLowerCase()) {
+      matchedViolation = v;
+      break;
+    }
+  }
+
+  // Fuzzy match (cutoff 0.6)
+  if (!matchedViolation) {
+    let bestMatch = null;
+    let highestSimilarity = 0;
+    for (let v of allViolations) {
+      const similarity = getSimilarity(violation, v);
+      if (similarity > highestSimilarity && similarity >= 0.6) {
+        highestSimilarity = similarity;
+        bestMatch = v;
+      }
+    }
+    matchedViolation = bestMatch;
+  }
+
+  if (!matchedViolation) {
+    throw new Error(`Unknown violation: '${violation}'.`);
+  }
+
+  const violationRules = rules.filter(r => r.violation === matchedViolation);
+  let matchedRule = null;
+  for (let r of violationRules) {
+    const ruleVt = r.vehicle_type.toLowerCase();
+    if (ruleVt === 'all' || ruleVt === 'any' || ruleVt === normalizedVehicle.toLowerCase()) {
+      matchedRule = r;
+      break;
+    }
+  }
+
+  if (!matchedRule) {
+    throw new Error(`Violation '${matchedViolation}' is not applicable to vehicle type '${normalizedVehicle}'.`);
+  }
+
+  const fineAmount = repeatOffense ? matchedRule.repeat_fine : matchedRule.fine;
+
+  return {
+    state: matchedRule.state,
+    vehicle_type: normalizedVehicle,
+    violation: matchedRule.violation,
+    law_section: matchedRule.law_section,
+    fine: fineAmount,
+    repeat_offense: repeatOffense,
+    license_suspension: matchedRule.license_suspension,
+    isOffline: true
+  };
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const appRef = useRef(null);
+
+  // Connection and Queue States
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
+  const [ocrQueue, setOcrQueue] = useState([]);
+  const [networkAlert, setNetworkAlert] = useState(null);
+
+  // PWA Installation States
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [isInstallable, setIsInstallable] = useState(false);
 
   // Stats Counters
   const [statCounts, setStatCounts] = useState({ ocr: 0, fines: 0, compliances: 0 });
@@ -113,6 +242,135 @@ function App() {
   useEffect(() => {
     localStorage.setItem('aegis-calc-history', JSON.stringify(calculatorHistory));
   }, [calculatorHistory]);
+
+  // Load IndexedDB offline queue on mount
+  useEffect(() => {
+    const loadSavedQueue = async () => {
+      try {
+        const saved = await getOfflineQueue();
+        if (saved && saved.length > 0) {
+          setOcrQueue(saved);
+          console.log(`Loaded ${saved.length} pending files from IndexedDB`);
+        }
+      } catch (err) {
+        console.error("Failed to load offline queue from IndexedDB:", err);
+      }
+    };
+    loadSavedQueue();
+  }, []);
+
+  // PWA Install prompt listener
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+      setIsInstallable(true);
+    };
+
+    const handleAppInstalled = () => {
+      setIsInstallable(false);
+      setDeferredPrompt(null);
+      console.log('Aegis App was successfully installed!');
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
+
+  const handleInstallApp = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    console.log(`User choice for PWA installation: ${outcome}`);
+    setDeferredPrompt(null);
+    setIsInstallable(false);
+  };
+
+  // Toast notifications & Heartbeat connectivity check
+  useEffect(() => {
+    let checkInterval;
+
+    const checkConnectivity = async () => {
+      // If browser says we are offline, don't even ping the server
+      if (!navigator.onLine) {
+        if (!isOffline) {
+          setIsOffline(true);
+          setNetworkAlert({
+            type: 'offline',
+            message: 'No internet connection detected. Switched to offline database mode.'
+          });
+          setTimeout(() => setNetworkAlert(null), 5000);
+        }
+        return;
+      }
+
+      // If navigator says we are online, ping the FastAPI backend to verify it's actually alive
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3500); // 3.5 seconds timeout
+
+        const res = await fetch('/health', {
+          method: 'GET',
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+          if (isOffline) {
+            setIsOffline(false);
+            setNetworkAlert({
+              type: 'online',
+              message: 'Connection to FastAPI backend server restored!'
+            });
+            setTimeout(() => setNetworkAlert(null), 5000);
+          }
+        } else {
+          throw new Error("Backend server returned non-OK status");
+        }
+      } catch (err) {
+        if (!isOffline) {
+          setIsOffline(true);
+          setNetworkAlert({
+            type: 'offline',
+            message: 'FastAPI backend server is unreachable. Switched to offline database mode.'
+          });
+          setTimeout(() => setNetworkAlert(null), 5000);
+        }
+      }
+    };
+
+    const handleOffline = () => {
+      setIsOffline(true);
+      setNetworkAlert({
+        type: 'offline',
+        message: 'No internet connection detected. Switched to offline database mode.'
+      });
+      setTimeout(() => setNetworkAlert(null), 5000);
+    };
+
+    const handleOnline = () => {
+      checkConnectivity();
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    // Initial check and periodic heartbeat
+    checkConnectivity();
+    checkInterval = setInterval(checkConnectivity, 10000);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      clearInterval(checkInterval);
+    };
+  }, [isOffline]);
 
   // Simulated telemetry activity feed additions
   useEffect(() => {
@@ -386,17 +644,38 @@ function App() {
     }
   };
 
-  const processChallanFile = (file) => {
-    setIsOcrProcessing(true);
-    setOcrError('');
-    setOcrResult(null);
-
+  function processChallanFile(file) {
     // Setup preview URL if image
     if (file.type.startsWith('image/')) {
       setChallanPreviewUrl(URL.createObjectURL(file));
     } else {
       setChallanPreviewUrl(null);
     }
+
+    if (isOffline) {
+      const saveFile = async () => {
+        try {
+          const dbId = await saveFileToOfflineQueue(file);
+          file.dbId = dbId;
+          setOcrQueue(prev => {
+            if (prev.some(f => f.name === file.name && f.size === file.size)) return prev;
+            return [...prev, file];
+          });
+        } catch (err) {
+          console.error("Failed to save queued file to IndexedDB:", err);
+        }
+      };
+      saveFile();
+      setNetworkAlert({
+        type: 'queue',
+        message: `Offline mode: Added '${file.name}' to the upload queue. It will automatically process when connection is restored.`
+      });
+      return;
+    }
+
+    setIsOcrProcessing(true);
+    setOcrError('');
+    setOcrResult(null);
 
     // Dynamic scanner laser animation
     gsap.killTweensOf('.scanner-laser');
@@ -465,7 +744,37 @@ function App() {
         gsap.killTweensOf('.scanner-laser');
         gsap.set('.scanner-laser', { opacity: 0 });
       });
-  };
+  }
+
+  // Sync / Process queued files when connection is restored
+  useEffect(() => {
+    if (!isOffline && ocrQueue.length > 0) {
+      setNetworkAlert({
+        type: 'sync',
+        message: `Restored connection! Processing ${ocrQueue.length} queued challan upload(s)...`
+      });
+      
+      const queueToProcess = [...ocrQueue];
+      setOcrQueue([]);
+      
+      // Process one by one with a slight stagger and delete from IndexedDB
+      queueToProcess.forEach((file, index) => {
+        setTimeout(async () => {
+          if (file.dbId) {
+            try {
+              await removeFileFromOfflineQueue(file.dbId);
+              console.log(`Successfully removed file ${file.name} from IndexedDB queue`);
+            } catch (err) {
+              console.error("Failed to remove file from IndexedDB:", err);
+            }
+          }
+          processChallanFile(file);
+        }, index * 1200);
+      });
+      
+      setTimeout(() => setNetworkAlert(null), 6000);
+    }
+  }, [isOffline, ocrQueue]);
 
   // --- TAB 3: DYNAMIC FINE CALCULATOR ---
   const [calcState, setCalcState] = useState('Rajasthan');
@@ -497,6 +806,64 @@ function App() {
     setSuggestions([]);
   };
 
+  const displayCalculationResult = (data) => {
+    // Calculate overspeeding surcharge if applicable
+    let finalFine = data.fine;
+    let surchargeAmount = 0;
+    let limit = 0;
+    if (calcViolation.toLowerCase().includes('speed') || calcViolation.toLowerCase().includes('overspeed')) {
+      limit = calcVehicle === 'Bike' ? 50 : calcVehicle === 'Car' ? 70 : 60;
+      surchargeAmount = Math.max(0, recordedSpeed - limit) * 120;
+      finalFine += surchargeAmount;
+    }
+
+    const enrichedData = {
+      ...data,
+      fine: finalFine,
+      surcharge: surchargeAmount,
+      speedLimit: limit,
+      recordedSpeed: recordedSpeed
+    };
+
+    setCalcResult(enrichedData);
+    setIsCalculating(false);
+
+    // Add to history
+    setCalculatorHistory(prev => {
+      const newHist = [
+        {
+          violation: data.violation,
+          state: data.state,
+          vehicle_type: data.vehicle_type,
+          fine: finalFine,
+          date: new Date().toLocaleDateString()
+        },
+        ...prev
+      ];
+      return newHist.slice(0, 10);
+    });
+
+    // Animate counter
+    const targetVal = finalFine;
+    const countObj = { val: 0 };
+    gsap.to(countObj, {
+      val: targetVal,
+      duration: 1.3,
+      ease: 'power3.out',
+      onUpdate: () => {
+        setAnimatedFine(Math.floor(countObj.val));
+      }
+    });
+
+    // Animate results card entrance
+    setTimeout(() => {
+      gsap.fromTo('.calculation-result',
+        { opacity: 0, y: 30, scale: 0.98 },
+        { opacity: 1, y: 0, scale: 1, duration: 0.7, ease: 'power3.out' }
+      );
+    }, 50);
+  };
+
   const handleCalculate = (e) => {
     e.preventDefault();
     if (!calcViolation) return;
@@ -504,6 +871,21 @@ function App() {
     setIsCalculating(true);
     setCalcError('');
     setCalcResult(null);
+
+    const runLocalCalculation = () => {
+      try {
+        const localResult = calculateFineClientSide(calcState, calcVehicle, calcViolation, calcRepeat);
+        displayCalculationResult(localResult);
+      } catch (err) {
+        setCalcError(err.message);
+        setIsCalculating(false);
+      }
+    };
+
+    if (isOffline) {
+      setTimeout(() => runLocalCalculation(), 400); // Small delay to simulate processing
+      return;
+    }
 
     fetch('/fine/calculate', {
       method: 'POST',
@@ -525,65 +907,11 @@ function App() {
         return res.json();
       })
       .then((data) => {
-        // Calculate overspeeding surcharge if applicable
-        let finalFine = data.fine;
-        let surchargeAmount = 0;
-        let limit = 0;
-        if (calcViolation.toLowerCase().includes('speed') || calcViolation.toLowerCase().includes('overspeed')) {
-          limit = calcVehicle === 'Bike' ? 50 : calcVehicle === 'Car' ? 70 : 60;
-          surchargeAmount = Math.max(0, recordedSpeed - limit) * 120;
-          finalFine += surchargeAmount;
-        }
-
-        const enrichedData = {
-          ...data,
-          fine: finalFine,
-          surcharge: surchargeAmount,
-          speedLimit: limit,
-          recordedSpeed: recordedSpeed
-        };
-
-        setCalcResult(enrichedData);
-        setIsCalculating(false);
-
-        // Add to history
-        setCalculatorHistory(prev => {
-          const newHist = [
-            {
-              violation: data.violation,
-              state: data.state,
-              vehicle_type: data.vehicle_type,
-              fine: finalFine,
-              date: new Date().toLocaleDateString()
-            },
-            ...prev
-          ];
-          return newHist.slice(0, 10);
-        });
-
-        // Animate counter
-        const targetVal = finalFine;
-        const countObj = { val: 0 };
-        gsap.to(countObj, {
-          val: targetVal,
-          duration: 1.3,
-          ease: 'power3.out',
-          onUpdate: () => {
-            setAnimatedFine(Math.floor(countObj.val));
-          }
-        });
-
-        // Animate results card entrance
-        setTimeout(() => {
-          gsap.fromTo('.calculation-result',
-            { opacity: 0, y: 30, scale: 0.98 },
-            { opacity: 1, y: 0, scale: 1, duration: 0.7, ease: 'power3.out' }
-          );
-        }, 50);
+        displayCalculationResult(data);
       })
       .catch((err) => {
-        setCalcError(err.message);
-        setIsCalculating(false);
+        console.warn("Backend calculation failed. Falling back to local rules engine: ", err);
+        runLocalCalculation();
       });
   };
 
@@ -639,6 +967,82 @@ function App() {
     if (!textToSend) setChatInput('');
     setIsBotTyping(true);
 
+    const runOfflineChat = () => {
+      setTimeout(() => {
+        const queryLower = query.toLowerCase();
+        let answer = "";
+        let sources = [];
+
+        // Check if query matches any known violation keywords
+        const keywords = [
+          { key: "helmet", name: "No Helmet" },
+          { key: "seatbelt", name: "No Seatbelt" },
+          { key: "signal", name: "Signal Jumping" },
+          { key: "speed", name: "Overspeeding" },
+          { key: "drunk", name: "Drunk Driving" },
+          { key: "drink", name: "Drunk Driving" },
+          { key: "insurance", name: "No Insurance" },
+          { key: "license", name: "No License" },
+          { key: "phone", name: "Mobile Phone Usage" },
+          { key: "mobile", name: "Mobile Phone Usage" },
+          { key: "park", name: "Wrong Parking" },
+          { key: "triple", name: "Triple Riding" },
+          { key: "pucc", name: "PUCC violation" },
+          { key: "pollution", name: "PUCC violation" },
+          { key: "registration", name: "Driving without registration" },
+          { key: "modify", name: "Illegal modification" },
+          { key: "modification", name: "Illegal modification" },
+          { key: "rash", name: "Rash driving" }
+        ];
+
+        let matchedViolations = [];
+        keywords.forEach(item => {
+          if (queryLower.includes(item.key) && !matchedViolations.includes(item.name)) {
+            matchedViolations.push(item.name);
+          }
+        });
+
+        if (matchedViolations.length > 0) {
+          answer = `🤖 **Offline Cop Mode:** I detected inquiries regarding the following violations in your message: **${matchedViolations.join(', ')}**.\n\nHere are the details from our local database:\n\n`;
+          
+          matchedViolations.forEach(violationName => {
+            answer += `#### 🚦 ${violationName}\n`;
+            
+            // Get Rajasthan details
+            const rajRule = RULES_DATABASE.rajasthan.find(r => r.violation === violationName);
+            if (rajRule) {
+              answer += `- **Rajasthan**: Base penalty of **₹${rajRule.fine}** (₹${rajRule.repeat_fine} repeat). Section: **${rajRule.law_section}**. License: **${rajRule.license_suspension === 'None' ? 'No suspension' : `Suspended ${rajRule.license_suspension}`}**.\n`;
+              sources.push(rajRule.law_section);
+            }
+            
+            // Get Maharashtra details
+            const mahRule = RULES_DATABASE.maharashtra.find(r => r.violation === violationName);
+            if (mahRule) {
+              answer += `- **Maharashtra**: Base penalty of **₹${mahRule.fine}** (₹${mahRule.repeat_fine} repeat). Section: **${mahRule.law_section}**. License: **${mahRule.license_suspension === 'None' ? 'No suspension' : `Suspended ${mahRule.license_suspension}`}**.\n`;
+              if (!sources.includes(mahRule.law_section)) sources.push(mahRule.law_section);
+            }
+            answer += `\n`;
+          });
+          
+          answer += `*Note: You are currently offline. Full contextual explanations using Gemini RAG are unavailable until connection is restored.*`;
+        } else {
+          answer = `🤖 **Offline Cop Mode:** You are currently offline. Because the FastAPI server is unreachable, I cannot process general AI-based legal queries using Gemini.\n\nHowever, I can fetch **exact penalties and law sections** from our offline database. Please ask me about specific offences, for example:\n- *Helmet regulations*\n- *Seatbelt violations*\n- *Drunk driving penalties*\n- *Overspeeding fines*\n- *Wrong parking fines*\n\nOnce connection is restored, full chat capabilities will resume automatically!`;
+        }
+
+        setMessages(prev => [...prev, {
+          sender: 'assistant',
+          text: answer,
+          sources: sources
+        }]);
+        setIsBotTyping(false);
+      }, 800);
+    };
+
+    if (isOffline) {
+      runOfflineChat();
+      return;
+    }
+
     fetch('/chat', {
       method: 'POST',
       headers: {
@@ -662,12 +1066,8 @@ function App() {
         setIsBotTyping(false);
       })
       .catch((err) => {
-        setMessages(prev => [...prev, {
-          sender: 'assistant',
-          text: `Sorry, I encountered an error: ${err.message}`,
-          sources: []
-        }]);
-        setIsBotTyping(false);
+        console.warn("RAG query fetch failed. Falling back to local responder: ", err);
+        runOfflineChat();
       });
   };
 
@@ -726,6 +1126,33 @@ function App() {
 
   return (
     <div className="app-container" ref={appRef}>
+      {/* Premium Connection Toast Banner */}
+      {networkAlert && (
+        <div style={{
+          position: 'fixed',
+          top: '20px',
+          right: '20px',
+          zIndex: 9999,
+          background: 'var(--glass-bg)',
+          border: `1px solid ${networkAlert.type === 'offline' ? 'var(--accent-rose)' : networkAlert.type === 'online' ? 'var(--accent-emerald)' : 'var(--accent-amber)'}`,
+          padding: '1rem 1.5rem',
+          borderRadius: '12px',
+          boxShadow: 'var(--shadow-lg)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+          maxWidth: '400px',
+          backdropFilter: 'blur(12px)',
+          transition: 'all 0.3s ease-in-out'
+        }}>
+          <span style={{ fontSize: '1.25rem' }}>
+            {networkAlert.type === 'offline' ? '⚠️' : networkAlert.type === 'online' ? '✅' : '🔄'}
+          </span>
+          <div style={{ fontSize: '0.9rem', fontWeight: 500 }}>
+            {networkAlert.message}
+          </div>
+        </div>
+      )}
       {/* Sidebar Navigation */}
       <aside className="sidebar">
         <div>
@@ -819,6 +1246,30 @@ function App() {
             )}
           </div>
           <div className="header-actions" style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            {isInstallable && (
+              <button 
+                className="btn-chat-action" 
+                onClick={handleInstallApp}
+                title="Install Aegis Traffic App"
+                style={{ 
+                  fontSize: '0.9rem', 
+                  padding: '0.6rem 1rem', 
+                  borderRadius: '20px', 
+                  background: 'var(--accent-purple)', 
+                  border: '1px solid var(--glass-border)', 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  gap: '0.5rem',
+                  cursor: 'pointer',
+                  color: '#ffffff',
+                  fontWeight: 600,
+                  transition: 'var(--transition-fast)'
+                }}
+              >
+                <Download size={16} />
+                <span>Install App</span>
+              </button>
+            )}
             <button 
               className="btn-chat-action" 
               onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
@@ -838,9 +1289,9 @@ function App() {
             >
               {theme === 'dark' ? '☀️' : '🌙'}
             </button>
-            <div className="badge-status">
-              <span className="status-dot"></span>
-              <span>FastAPI Connected</span>
+            <div className={`badge-status ${isOffline ? 'offline' : ''}`} style={isOffline ? { borderColor: 'var(--accent-rose)', color: 'var(--accent-rose)' } : {}}>
+              <span className="status-dot" style={isOffline ? { backgroundColor: 'var(--accent-rose)', boxShadow: '0 0 10px var(--accent-rose)', animation: 'pulse-dot 1.5s infinite' } : {}}></span>
+              <span>{isOffline ? 'Offline Mode (Local DB)' : 'FastAPI Connected'}</span>
             </div>
           </div>
         </header>
@@ -1068,6 +1519,25 @@ function App() {
                 disabled={isOcrProcessing}
               />
             </div>
+
+            {/* Offline Queue Display */}
+            {ocrQueue.length > 0 && (
+              <div style={{ marginTop: '1.5rem', padding: '1.25rem', background: 'var(--bg-tertiary)', border: '1px dashed var(--accent-amber)', borderRadius: '12px' }}>
+                <h4 style={{ fontSize: '0.95rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-primary)', marginBottom: '0.75rem' }}>
+                  <Clock size={16} style={{ color: 'var(--accent-amber)' }} /> Pending Reconnection Queue ({ocrQueue.length} document{ocrQueue.length > 1 ? 's' : ''})
+                </h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {ocrQueue.map((file, idx) => (
+                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.85rem', background: 'var(--bg-secondary)', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid var(--glass-border)' }}>
+                      <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '75%', color: 'var(--text-primary)' }}>📄 {file.name}</span>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--accent-amber)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <span style={{ width: '6px', height: '6px', backgroundColor: 'var(--accent-amber)', borderRadius: '50%', display: 'inline-block' }}></span> Waiting...
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Error Message */}
             {ocrError && (
@@ -1320,7 +1790,24 @@ function App() {
 
             {/* Output result card */}
             {calcResult && (
-              <div className="calculation-result">
+              <div className="calculation-result" style={calcResult.isOffline ? { borderColor: 'var(--accent-amber)' } : {}}>
+                {calcResult.isOffline && (
+                  <div style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.25rem',
+                    background: 'rgba(236, 72, 153, 0.1)',
+                    color: 'var(--accent-amber)',
+                    padding: '0.25rem 0.75rem',
+                    borderRadius: '20px',
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    marginBottom: '1.25rem',
+                    border: '1px solid rgba(236, 72, 153, 0.2)'
+                  }}>
+                    🛡️ Local Database Verification
+                  </div>
+                )}
                 <h3 style={{ textTransform: 'uppercase', fontSize: '0.85rem', letterSpacing: '1.5px', color: 'var(--text-secondary)' }}>
                   Computed Fine Amount
                 </h3>

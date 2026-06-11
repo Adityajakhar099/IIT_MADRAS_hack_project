@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -32,6 +32,43 @@ if os.path.exists(dist_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(dist_dir, "assets")), name="assets")
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/sw.js")
+def get_sw():
+    sw_path = os.path.join(dist_dir, "sw.js")
+    if os.path.exists(sw_path):
+        return FileResponse(sw_path, media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="Service worker not found")
+
+
+@app.get("/manifest.json")
+def get_manifest():
+    manifest_path = os.path.join(dist_dir, "manifest.json")
+    if os.path.exists(manifest_path):
+        return FileResponse(manifest_path, media_type="application/json")
+    raise HTTPException(status_code=404, detail="Manifest not found")
+
+
+@app.get("/favicon.svg")
+def get_favicon():
+    favicon_path = os.path.join(dist_dir, "favicon.svg")
+    if os.path.exists(favicon_path):
+        return FileResponse(favicon_path, media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="Favicon not found")
+
+
+@app.get("/icons.svg")
+def get_icons():
+    icons_path = os.path.join(dist_dir, "icons.svg")
+    if os.path.exists(icons_path):
+        return FileResponse(icons_path, media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="Icons not found")
+
+
 @app.get("/")
 def home():
     index_path = os.path.join(dist_dir, "index.html")
@@ -39,4 +76,4 @@ def home():
         return FileResponse(index_path)
     return {
         "message": "Traffic AI running. Frontend build not detected. Please run 'npm run build' inside the 'frontend/' folder to build the static React assets, or run 'npm run dev' to start the local Vite development server."
-    }
+    }
